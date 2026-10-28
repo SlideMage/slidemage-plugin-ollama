@@ -65,15 +65,17 @@ def test_address_precedence_and_provider_captures_settings(monkeypatch):
 
 @pytest.mark.parametrize("task", TASKS)
 def test_local_problem_text_and_no_fallback(task):
-    route = OllamaRoute(FakeHost())
+    host = FakeHost()
+    route = OllamaRoute(host)
+    ctx = host.context()
     expected = f"Choose an Ollama model for {TASK_LABELS[task].lower()} under AI setup (the ▾ of the AI switch)."
     missing = Route("ollama", task, "")
     resolved = Route("ollama", task, "qwen3:32b")
     assert route.default_choice(task) == "" and route.problem(None, missing) == expected
     assert route.problem(None, resolved) == ""
-    assert route.provider(None, missing).model == ""
-    assert route.provider(None, resolved).model == "qwen3:32b"
-    assert route.provider(None, resolved) is not route.provider(None, resolved)
+    assert route.provider(ctx, missing).model == ""
+    assert route.provider(ctx, resolved).model == "qwen3:32b"
+    assert route.provider(ctx, resolved) is not route.provider(ctx, resolved)
     assert route.choice_label(resolved.model) == resolved.model
     assert route.split_choice(resolved.model) == (resolved.model, None)
     assert route.valid_choice(None, resolved.model) and not route.valid_choice(None, "")
@@ -98,14 +100,15 @@ def test_model_choices_use_a_worker_and_filter_capabilities(monkeypatch):
         return installed
 
     monkeypatch.setattr(OllamaProvider, "installed", discover)
-    assert all(route.model_choices(None, task) == [] for task in TASKS)
+    assert all(route.model_choices(host.context(), task) == [] for task in TASKS)
     assert len(host.pending) == 1 and calls == []
     host.finish_next()
     assert calls == [(ollama_host(host), True)]
-    assert route.model_choices(None, CHAT) == ["qwen3", "eyes"]
-    assert route.model_choices(None, IMAGE_DESCRIPTION) == ["eyes"]
-    assert route.model_choices(None, TRANSLATION) == ["qwen3", "eyes", "writer"]
-    assert route.model_choices(None, FIXES) == ["qwen3", "eyes", "writer"]
+    assert host.changed_routes == ["ollama"]
+    assert route.model_choices(host.context(), CHAT) == ["qwen3", "eyes"]
+    assert route.model_choices(host.context(), IMAGE_DESCRIPTION) == ["eyes"]
+    assert route.model_choices(host.context(), TRANSLATION) == ["qwen3", "eyes", "writer"]
+    assert route.model_choices(host.context(), FIXES) == ["qwen3", "eyes", "writer"]
     assert not host.pending
 
 
@@ -113,12 +116,12 @@ def test_old_model_lists_cannot_replace_a_new_address(monkeypatch):
     host = FakeHost(settings=FakeSettings({"ollama_host": "http://old"}))
     route = OllamaRoute(host)
     monkeypatch.setattr(OllamaProvider, "installed", lambda p, **kw: [InstalledModel(p.host, 0, "")])
-    route.model_choices(None, TRANSLATION)
+    route.model_choices(host.context(), TRANSLATION)
     host.store.set("ollama_host", "http://new")
-    assert route.model_choices(None, TRANSLATION) == []
+    assert route.model_choices(host.context(), TRANSLATION) == []
     host.finish_next(index=1)  # the new address answers first
     host.finish_next()
-    assert route.model_choices(None, TRANSLATION) == ["http://new"]
+    assert route.model_choices(host.context(), TRANSLATION) == ["http://new"]
 
 
 def test_discovery_errors_are_logged_and_can_be_refreshed(monkeypatch):
@@ -129,9 +132,37 @@ def test_discovery_errors_are_logged_and_can_be_refreshed(monkeypatch):
         raise RuntimeError("discovery failed")
 
     monkeypatch.setattr(OllamaProvider, "installed", fail)
-    route.model_choices(None, CHAT)
+    route.model_choices(host.context(), CHAT)
     host.finish_next()
-    assert route.model_choices(None, CHAT) == [] and not host.pending
+    assert route.model_choices(host.context(), CHAT) == [] and not host.pending
     assert host.logs == ["Could not list Ollama models: discovery failed"]
     route.refresh_models()
     assert len(host.pending) == 1
+
+
+def test_legacy_address_and_context_services(monkeypatch):
+    monkeypatch.delenv("OLLAMA_HOST", raising=False)
+    host = FakeHost()
+    host.legacy_address = "http://legacy"
+    route = OllamaRoute(host)
+    ctx = host.context()
+    assert ollama_host(host) == "http://legacy"
+    assert route.provider(ctx, Route("ollama", CHAT, "m")).host == "http://legacy"
+    ctx.settings.set("ollama_host", "http://plugin")
+    assert route.provider(ctx, Route("ollama", CHAT, "m")).host == "http://plugin"
+    ctx.settings.set("ollama_host", "")
+    assert ollama_host(host) == DEFAULT_OLLAMA_HOST
+    assert host.legacy_address == "http://legacy"
+
+
+def test_route_uses_call_context_for_provider_and_discovery(monkeypatch):
+    host = FakeHost(settings=FakeSettings({"ollama_host": "http://host"}))
+    other = FakeHost(settings=FakeSettings({"ollama_host": "http://context"}))
+    route = OllamaRoute(host)
+    ctx = other.context()
+    monkeypatch.setattr(OllamaProvider, "installed", lambda p, **kw: [InstalledModel(p.host, 0, "")])
+    assert route.provider(ctx, Route("ollama", CHAT, "m")).host == "http://context"
+    assert route.model_choices(ctx, TRANSLATION) == []
+    host.finish_next()
+    assert route.model_choices(ctx, TRANSLATION) == ["http://context"]
+    assert host.changed_routes == ["ollama"]

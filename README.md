@@ -8,7 +8,7 @@ address and the models installed there, and updates or deletes them.
   computer, or the `OLLAMA_HOST` environment variable.
 - **Model management.** Update pulls the latest weights of an installed model (a custom model you built with
   `ollama create` is relinked to its refreshed base). Delete removes the model's files from Ollama's store.
-  The plugin serializes its own administration requests. Coordination with core AI tasks is not yet available.
+  Administration shares the Ollama task reservation with SlideMage's AI work.
 
 **Privacy.** When the server is on this computer, nothing leaves the computer: the prompts, the slides and the
 answers stay between SlideMage and Ollama. The plugin contacts only the server address you set, and only for the

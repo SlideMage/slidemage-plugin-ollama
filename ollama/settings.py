@@ -2,9 +2,8 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
 """The Ollama section of Settings → AI, built with public host widgets.
 
-Discovery and administration use run_in_background, whose completion callback is
-independent of the page's lifetime. Only the UI callback releases the app-wide
-plugin administration slot; workers use a captured address and never access settings or widgets.
+Discovery and administration run off-thread. The host's route lease coordinates
+administration with AI work, and progress and completion return to the UI thread.
 """
 from __future__ import annotations
 
@@ -16,28 +15,11 @@ from PySide6.QtWidgets import (QAbstractItemView, QHBoxLayout, QLineEdit, QListW
                                QMessageBox, QPushButton, QWidget)
 
 from . import admin
-from slidemage.plugin_api import Host
+from slidemage.plugin_api import Host, RouteTaskLease
 from .provider import InstalledModel, ollama_host
 
 if TYPE_CHECKING:
     from .route import OllamaRoute
-
-_admin_task: str | None = None
-
-
-def _try_start(host: Host, what: str) -> bool:
-    global _admin_task
-    if _admin_task is not None:
-        host.show_message(f"Ollama is busy: {_admin_task}", error=True)
-        return False
-    _admin_task = what
-    return True
-
-
-def _end() -> None:
-    global _admin_task
-    _admin_task = None
-
 
 def _row(*widgets: QWidget) -> QWidget:
     row = QWidget()
@@ -68,10 +50,11 @@ def _delete_models(address: str, models: list[str]) -> Results:
     return results
 
 
-def _update_models(address: str, models: list[str]) -> Results:
+def _update_models(address: str, models: list[str], report: Callable[[str], None]) -> Results:
     results: Results = []
     for model in models:
-        ok, error = admin.update_model(model, address)
+        report(f"Updating Ollama model {model}…")
+        ok, error = admin.update_model(model, address, on_progress=report)
         results.append((model, ok, error))
     return results
 
@@ -166,13 +149,15 @@ class OllamaTab(QObject):
         self.host.log(f"Ollama host set to {ollama_host(self.host)}")
         self.page.changed.emit()
         self.refresh()
+        self.host.model_choices_changed(self.route.id)
 
     def _on_delete(self) -> None:
         models = self.selected()
         if not models:
             return
         what = f"deleting {len(models)} model(s)" if len(models) > 1 else f"deleting {models[0]}"
-        if not _try_start(self.host, what):
+        lease = self.host.acquire_route_task(self.route.id, what)
+        if lease is None:
             return
         detail = (f'"{models[0]}"' if len(models) == 1 else
                   f"these {len(models)} models:\n\n" + "\n".join(f"  • {m}" for m in models))
@@ -185,13 +170,17 @@ class OllamaTab(QObject):
                 "shares its files: like \"ollama rm\", Ollama only removes files no other installed model "
                 "still references.")
         except BaseException:
-            _end()
+            lease.release()
             raise
         if confirm != QMessageBox.StandardButton.Yes:
-            _end()
+            lease.release()
             return
-        address = ollama_host(self.host)
-        self._run(lambda: _delete_models(address, models), "Deleted", "Delete failed")
+        try:
+            address = ollama_host(self.host)
+            self._run(lambda _report: _delete_models(address, models), "Deleted", "Delete failed", lease)
+        except BaseException:
+            lease.release()
+            raise
 
     def _on_update(self) -> None:
         models = self.selected()
@@ -206,13 +195,19 @@ class OllamaTab(QObject):
             "cannot be cancelled once started.")
         if confirm != QMessageBox.StandardButton.Yes:
             return
-        if not _try_start(self.host,
-                f"updating {len(models)} model(s)" if len(models) > 1 else f"updating {models[0]}"):
+        lease = self.host.acquire_route_task(
+            self.route.id, f"updating {len(models)} model(s)" if len(models) > 1 else f"updating {models[0]}")
+        if lease is None:
             return
-        address = ollama_host(self.host)
-        self._run(lambda: _update_models(address, models), "Updated", "Update failed")
+        try:
+            address = ollama_host(self.host)
+            self._run(lambda report: _update_models(address, models, report), "Updated", "Update failed", lease)
+        except BaseException:
+            lease.release()
+            raise
 
-    def _run(self, work: Callable[[], Results], done: str, failed_title: str) -> None:
+    def _run(self, work: Callable[[Callable[[str], None]], Results], done: str, failed_title: str,
+             lease: RouteTaskLease) -> None:
         self._busy = True
         self.host_edit.setEnabled(False)
         self.models_list.setEnabled(False)
@@ -220,7 +215,7 @@ class OllamaTab(QObject):
         host = self.host
 
         def finished(results: Results | None, error: BaseException | None) -> None:
-            _end()  # UI thread, even after the page was destroyed
+            lease.release()  # UI thread, even after the page was destroyed
             self._busy = False
             if error is not None:
                 host.log(f"{failed_title}: {error}")
@@ -240,6 +235,6 @@ class OllamaTab(QObject):
                 self.route.refresh_models()
 
         try:
-            host.run_in_background(work, finished)
+            host.run_in_background_with_progress(work, host.log, finished)
         except Exception as exc:  # the host could not schedule the work
             finished(None, exc)

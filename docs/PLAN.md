@@ -1,54 +1,52 @@
 # Ollama plugin: integration plan
 
-5a extracted the provider and admin code. 5b now targets `slidemage.plugin_api` on SlideMage's
-`feature/ai-routes` branch; the plugin is not yet a replacement for the built-in route in that branch.
-`requires_slidemage` remains `>=10.0`. See [Handover.md](Handover.md) for verification and the handoff.
+The plugin targets the unreleased API 1 additions in SlideMage's `feature/ai-routes` worktree. The plugin's
+code imports SlideMage only through `slidemage.plugin_api`. It is not yet a loadable replacement on that
+branch because the built-in route owns the same ID. `requires_slidemage` remains `>=10.0`; that version range
+alone does not guarantee these unreleased additions exist.
 
 ## Implemented
 
-- Activation registers an `ollama` route and one lazy AI settings section using the real Host. It does no
-  network I/O or widget construction. `settings_section()` returns `None` because the section is registered
-  separately; otherwise `AiPage` builds it twice.
-- The route follows the built-in route's resolved `Route` behavior: model readiness, no default, choice
-  splitting and validation, labels, provider factory, and `None` for core's adapters, task runner and chat.
-  Its asynchronous model cache filters chat for tools and image descriptions for vision. It starts discovery
-  on the first query or Settings refresh and ignores superseded results. This scheduling differs from the
-  built-in route's cache, which core explicitly fills.
-- Neutral agent messages, tool types, replies and exceptions come from `slidemage.plugin_api`; the copied
-  abortable HTTP transport remains local because the public API does not expose it. Task identifiers and
-  labels are local constants. Buttons and layout use Qt because Host exposes only Page, Field and caption.
-- Host `settings`, background workers, logging and messages replace the draft calls. Workers never use host
-  calls or widgets; administration logs completion on the UI thread. The fake structurally provides the
-  public Host methods, and unsupported services raise rather than pretending to work.
+- Activation registers the `ollama` route and a lazy AI settings section, without network or widget creation.
+  The route's `settings_section()` returns `None` because `add_settings_section` registers the builder.
+- Route methods accept `RouteContext`; providers and model discovery use its plugin settings and legacy
+  address reader. If the plugin has no saved address, the old effective address remains in use without
+  copying it into plugin storage. A saved plugin address wins; explicitly clearing it falls back to `OLLAMA_HOST` or
+  localhost. Core owns the persisted task choices and already maps the old `local` route ID to `ollama`.
+- Model discovery runs in a background worker, caches by effective address, filters tool and vision models,
+  discards superseded results, and calls `model_choices_changed` on the UI thread after publication. Address
+  changes also notify the host. Core's regular model grid and `fill_model_combo` now query route choices.
+- Settings administration uses `acquire_route_task` to share the Ollama reservation with core AI work, and
+  releases it on cancellation, scheduling failure, worker completion or page destruction. Pull progress is
+  sent through `run_in_background_with_progress` and logged on the UI thread. Workers capture the address and
+  do not access widgets or host settings.
+- The plugin supplies `provider()` and returns `None` for the optional task, image, translation and chat
+  adapters, as the built-in Ollama route does. Core supplies those adapters and its provider chat view.
+  `chat_surface_v2`, terminal widgets, hook context, task/image/translation helpers, `CancelToken`, and
+  `legacy_secret` are for implementations with their own surfaces, processes, hooks, task runners or secrets;
+  this provider has none, so no calls are needed. The abortable HTTP transport and route task IDs/labels
+  remain local; the API does not export those provider details or the route ID/label constants.
 
-## API gaps and decisions before integration
+## Remaining integration gaps and recommendations
 
-1. **Duplicate route:** core registers its built-in `ollama` route before the loader accepts plugin routes;
-   loader rejects the duplicate. Recommendation: remove the built-in registration as part of the coordinated
-   core extraction, keeping the ID and persisted choices. The plugin alone cannot resolve this.
-2. **Model discovery and notification:** core's `AiPage.set_installed` writes the built-in cache and
-   `ModelsGrid._offered` special-cases the `ollama` ID instead of consulting this route. The public API has no
-   call to notify the host that model choices changed or supply installed models to the existing pickers.
-   Recommendation: make pickers route-driven and add a route-change notification, then use the plugin cache;
-   remove the built-in-specific listing. The plugin's cache is otherwise visible on the next route query only.
-3. **Address migration:** Host has no read-only legacy settings accessor for the old `ollama_host`. The plugin
-   reads its own `ollama_host`, then `OLLAMA_HOST`, then localhost; an old saved core address is not migrated.
-   Recommendation: expose a narrowly scoped legacy address read and copy it once, without overwriting an
-   existing plugin setting. Core's `ai_profile` already maps old `local` model choices to `ollama`; those
-   choices remain core-owned and are not copied into plugin settings.
-4. **Shared Ollama task slot:** Host has no acquire/release service shared with core AI work. The plugin
-   serializes its own model administration, but it cannot refuse administration while a core AI batch is
-   running. Recommendation: expose a shared operation guard and use it for core work and plugin administration.
-5. **Progress:** Host callbacks are UI-thread-only and no worker-to-UI progress dispatch is specified.
-   Administration completion is logged on the UI thread, but live pull progress is not logged. Recommendation:
-   expose a thread-safe progress dispatch or explicitly document a worker-safe logging call.
-6. **Shared HTTP helpers:** the public API does not expose the abortable HTTP provider, error-body parser,
-   `Message` alias, task IDs/labels or agent context-size constant. The plugin keeps equivalents locally.
-   Recommendation: keep these provider details local unless core wants a stable shared transport/constants API.
+1. **Duplicate route:** `ai/routes.py` registers built-in Ollama before accepting plugin routes and rejects
+   the duplicate ID. Remove the built-in registration in the coordinated core extraction, preserving `ollama`
+   and persisted choices. The plugin cannot safely override the registry.
+2. **Built-in UI paths:** `ui/workspace/chat/view.py` and `chat/session.py` still list Ollama models through
+   the built-in provider; `ui/ai_models.py` and `ui/dialogs/settings_ai.py` still populate the built-in cache;
+   the assistant header reads the legacy host directly. Other built-in settings/discovery code also remains.
+   These can show or query the wrong server after a plugin address is saved. Convert those paths to the route's
+   cache/context and remove built-in-only polling and settings as part of extraction. The public host currently
+   has no direct call to update the legacy-only translation-prompt model list or the header's host text.
+3. **Legacy reader side effect:** the public context describes legacy readers as non-mutating, but the current
+   host delegates to `app_settings.get_ollama_host()`, whose `load()` migrates old project-level machine keys
+   into the machine store. The plugin does not write legacy settings itself. Make the host's reader honor its
+   non-mutating contract, or explicitly document that existing core migration can run on read.
+4. **CI and release source:** the Check workflow does not install SlideMage and the API additions are not in a
+   released host. Pin an agreed SlideMage revision or installable release in CI and set the compatibility range
+   once a release containing the additions exists. Do not claim `>=10.0` alone proves compatibility.
+5. **Transport verification:** the restricted runner replaces loopback sockets with in-memory streams. Run the
+   suite on a TCP-enabled runner to exercise actual socket shutdown and HTTP interaction.
 
-7. **CI source:** the existing Check workflow still installs only pytest and PySide6 and describes local draft
-   types; the suite now requires SlideMage's real API. Recommendation: select a pinned SlideMage checkout or
-   installable release for CI before updating the workflow; the branch is not yet a released host.
-
-Do not remove core's implementation or change the cross-repository API without a decision. Once agreed, test
-loading, settings, discovery, migration and shared task coordination against the extracted core and then release.
+A full loader/UI integration test requires the coordinated core extraction above; this repository cannot
+complete it on the current worktree by itself.

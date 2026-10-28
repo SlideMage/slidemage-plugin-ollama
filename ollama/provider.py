@@ -23,7 +23,7 @@ from collections.abc import Callable
 from dataclasses import dataclass
 
 from slidemage.plugin_api import (
-    AgentMessage, AssistantMessage, Cancelled, ChatReply, Host,
+    AgentMessage, AssistantMessage, Cancelled, ChatReply, Host, RouteContext,
     ProviderError, ToolCall, ToolResultsMessage, ToolSpec,
 )
 
@@ -35,9 +35,16 @@ AGENT_NUM_CTX = 16384       # Ollama's own default window (as low as 4096) would
 DEFAULT_OLLAMA_HOST = "http://localhost:11434"
 
 
-def ollama_host(host: Host) -> str:
-    """Saved address, then $OLLAMA_HOST, then localhost; an empty override is unset."""
-    saved = host.settings().get("ollama_host")
+def ollama_host(source: Host | RouteContext) -> str:
+    """Use a plugin override, or the legacy address until the user saves one.
+
+    An explicitly cleared override falls back to the environment/default, not the
+    old saved address. The legacy reader includes those fallbacks itself.
+    """
+    settings = source.settings() if callable(source.settings) else source.settings
+    saved = settings.get("ollama_host")
+    if saved is None:
+        return source.legacy_ollama_host()
     return (saved.strip() if isinstance(saved, str) else "") or os.environ.get("OLLAMA_HOST") or DEFAULT_OLLAMA_HOST
 
 

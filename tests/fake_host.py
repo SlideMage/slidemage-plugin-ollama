@@ -11,11 +11,12 @@ from concurrent.futures import ThreadPoolExecutor
 from copy import deepcopy
 from dataclasses import dataclass
 from pathlib import Path
+import os
 from threading import get_ident
 from typing import Any, Callable, Literal, TYPE_CHECKING
 
 from slidemage.plugin_api import (Credentials, Deck, EditWatch, ExternalEdits, Focus, FooterAction,
-                                  InsertPosition, TerminalService, Widget)
+                                  InsertPosition, RouteContext, TerminalService, Widget)
 
 if TYPE_CHECKING:
     from slidemage.plugin_api import ToolBox
@@ -57,6 +58,9 @@ class FakeHost:
         self.logs: list[str] = []
         self.messages: list[tuple[str, bool]] = []
         self.background_error: Exception | None = None
+        self.changed_routes: list[str] = []
+        self.legacy_address: str | None = None
+        self.route_tasks: dict[str, str] = {}
         self._active = True
         self._ui_thread = get_ident()
 
@@ -101,6 +105,48 @@ class FakeHost:
         if self.background_error is not None:
             raise self.background_error
         self.pending.append((work, done))
+
+    def context(self) -> RouteContext:
+        return RouteContext(root=Path("/project"), settings=self.store, cache_dir=Path("/cache"),
+                            legacy_cache_dir=None, credentials=lambda *_: None,
+                            legacy_secret=lambda *_: None, legacy_ollama_host=self.legacy_ollama_host,
+                            de_address="", glossary="")
+
+    def legacy_ollama_host(self) -> str:
+        self._check_ui()
+        return self.legacy_address or os.environ.get("OLLAMA_HOST") or "http://localhost:11434"
+
+    def model_choices_changed(self, route_id: str) -> None:
+        self._check_ui()
+        self.changed_routes.append(route_id)
+
+    def acquire_route_task(self, route_id: str, label: str):
+        self._check_ui()
+        if route_id in self.route_tasks:
+            self.show_message(f"Ollama is busy: {self.route_tasks[route_id]}", error=True)
+            return None
+        self.route_tasks[route_id] = label
+        host = self
+
+        class Lease:
+            def release(self):
+                host._check_ui()
+                host.route_tasks.pop(route_id, None)
+
+        return Lease()
+
+    def run_in_background_with_progress(self, work, progress, done) -> None:
+        reports = []
+
+        def run():
+            return work(reports.append)
+
+        def finished(result, error):
+            for value in reports:
+                progress(value)
+            done(result, error)
+
+        self.run_in_background(run, finished)
 
     def log(self, message) -> None:
         self._check_ui()

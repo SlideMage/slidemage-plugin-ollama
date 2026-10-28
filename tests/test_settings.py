@@ -108,11 +108,10 @@ def test_busy_slot_prevents_administration(tab, monkeypatch, operation):
     from PySide6.QtWidgets import QMessageBox
 
     monkeypatch.setattr(QMessageBox, "question", lambda *_a: QMessageBox.StandardButton.Yes)
-    from ollama import settings
-    monkeypatch.setattr(settings, "_admin_task", "another plugin administration")
+    tab.host.route_tasks["ollama"] = "another core AI job"
     getattr(tab, f"_on_{operation}")()
     assert not tab.host.pending
-    assert settings._admin_task == "another plugin administration"
+    assert tab.host.route_tasks["ollama"] == "another core AI job"
 
 
 @pytest.mark.parametrize("operation", ["delete", "update"])
@@ -121,8 +120,7 @@ def test_cancelled_confirmation_leaves_no_slot(tab, monkeypatch, operation):
 
     monkeypatch.setattr(QMessageBox, "question", lambda *_a: QMessageBox.StandardButton.No)
     getattr(tab, f"_on_{operation}")()
-    from ollama import settings
-    assert settings._admin_task is None and not tab.host.pending
+    assert not tab.host.route_tasks and not tab.host.pending
 
 
 @pytest.mark.parametrize("operation", ["delete", "update"])
@@ -144,8 +142,7 @@ def test_admin_finishes_after_page_is_destroyed(tab, monkeypatch, operation, out
 
     monkeypatch.setattr(admin, f"{operation}_model", work)
     getattr(tab, f"_on_{operation}")()
-    from ollama import settings
-    assert settings._admin_task is not None and len(tab.host.pending) == 1
+    assert "ollama" in tab.host.route_tasks and len(tab.host.pending) == 1
     assert not tab.host_edit.isEnabled() and not tab.update_button.isEnabled()
     tab.host.store.set("ollama_host", "http://changed-while-running")
     tab.page.deleteLater()
@@ -153,21 +150,34 @@ def test_admin_finishes_after_page_is_destroyed(tab, monkeypatch, operation, out
     assert not tab._alive
     tab.host.finish_next()
     assert calls == [("qwen3", "http://original:11434")]
-    assert settings._admin_task is None
+    if operation == "update":
+        assert "pulling weights" in tab.host.logs
+    assert not tab.host.route_tasks
     assert bool(tab.host.messages) == (outcome != "success")
     if tab.host.messages:
         assert tab.host.messages[-1][1] is True
     tab.host.finish_next()  # refresh the route's cache, without the page
-    assert tab.route.model_choices(None, TRANSLATION) == ["qwen3"]
+    assert tab.route.model_choices(tab.host.context(), TRANSLATION) == ["qwen3"]
 
 
 def test_scheduling_failure_releases_slot_and_reports_error(tab, monkeypatch):
     from PySide6.QtWidgets import QMessageBox
 
     monkeypatch.setattr(QMessageBox, "question", lambda *_a: QMessageBox.StandardButton.Yes)
-    from ollama import settings
     tab.host.background_error = RuntimeError("no worker available")
     tab._on_delete()
-    assert settings._admin_task is None
+    assert not tab.host.route_tasks
     assert not tab.host.pending and tab.host_edit.isEnabled()
     assert tab.host.messages == [("Delete failed: RuntimeError: no worker available", True)]
+
+
+def test_confirmation_error_releases_shared_lease(tab, monkeypatch):
+    from PySide6.QtWidgets import QMessageBox
+
+    def fail(*_args):
+        raise RuntimeError("dialog failed")
+
+    monkeypatch.setattr(QMessageBox, "question", fail)
+    with pytest.raises(RuntimeError, match="dialog failed"):
+        tab._on_delete()
+    assert not tab.host.route_tasks
