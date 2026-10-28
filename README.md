@@ -13,7 +13,9 @@ address and the models installed there, and updates or deletes them.
 **Privacy.** When the server is on this computer, nothing leaves the computer: the prompts, the slides and the
 answers stay between SlideMage and Ollama. The plugin contacts only the server address you set, and only for the
 requests of the features above and the model list. If you point it at another machine, that machine gets the same
-requests.
+requests. For remote servers the plugin honours `HTTP_PROXY` or `HTTPS_PROXY` and `NO_PROXY` (including
+lowercase forms and `ALL_PROXY`); proxy URLs must use `http://`. HTTPS uses a CONNECT tunnel. Loopback addresses
+and `localhost` always connect directly. An HTTP proxy can see requests sent to a remote HTTP server.
 
 **Requirements.** Ollama installed and running (ollama.com), and at least one model pulled, for example
 `ollama pull qwen3`. The agent chat needs a model that can call tools.
@@ -35,7 +37,8 @@ workflow runs it on every push.
 the package) and its `.sha256`.
 
 Tests require SlideMage's source on `PYTHONPATH`, pytest and PySide6. Qt runs offscreen; HTTP tests normally
-use loopback TCP and fall back to in-memory streams when sockets are forbidden. See the handover for the exact
+use loopback TCP and fall back to in-memory streams when sockets are forbidden; real connection and proxy
+tests are skipped when sockets are forbidden. See the handover for the exact
 commands and limitations.
 
 `docs/PLAN.md` lists the completed import replacements and the remaining host integration work;
