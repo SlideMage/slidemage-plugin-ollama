@@ -1,0 +1,4 @@
+[tool.pytest.ini_options]
+# The plugin package imports from the repository's root; the tests import each other's fixtures.
+pythonpath = [".", "tests"]
+testpaths = ["tests"]
