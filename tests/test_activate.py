@@ -1,6 +1,6 @@
 # SPDX-FileCopyrightText: 2026 Stefan Palan, Jürgen Fleiß
 # SPDX-License-Identifier: GPL-3.0-or-later
-"""The plugin-side draft contract: activation, migration, routing and async choices."""
+"""Activation, the public route contract, and async choices."""
 from __future__ import annotations
 
 import os
@@ -11,16 +11,17 @@ from types import SimpleNamespace
 import pytest
 
 from fake_host import FakeHost, FakeSettings
-from ollama import MIGRATED_KEY, activate
-from ollama.host import CHAT, FIXES, IMAGE_DESCRIPTION, TASK_LABELS, TASKS, TRANSLATION, ProviderError
+from ollama import activate
+from ollama.tasks import CHAT, FIXES, IMAGE_DESCRIPTION, TASK_LABELS, TASKS, TRANSLATION
+from slidemage.plugin_api import Route
 from ollama.provider import DEFAULT_OLLAMA_HOST, InstalledModel, OllamaProvider, ollama_host
 from ollama.route import OllamaRoute
 
 
-def test_activation_is_lazy_and_needs_no_qt_slidemage_or_network(monkeypatch):
+def test_activation_is_lazy_and_needs_no_qt_or_network(monkeypatch):
     subprocess.run([sys.executable, "-c", """
 import socket, sys
-sys.modules['PySide6'] = sys.modules['slidemage'] = None
+sys.modules['PySide6'] = None
 def no_network(*args, **kwargs):
     raise AssertionError('activation attempted network')
 socket.socket.connect = no_network
@@ -30,7 +31,7 @@ host = FakeHost()
 activate(host)
 assert not host.pending
 assert 'ollama.settings' not in sys.modules
-"""], check=True, env={**os.environ, "PYTHONPATH": os.pathsep.join((".", "tests"))})
+"""], check=True, env={**os.environ, "PYTHONPATH": os.pathsep.join((".", "tests", os.environ.get("PYTHONPATH", "")))})
     host = FakeHost()
     activate(host)
     host.finish_activation()
@@ -45,61 +46,6 @@ assert 'ollama.settings' not in sys.modules
     assert (route.id, route.service, route.is_local, route.tasks) == ("ollama", "Ollama", True, frozenset(TASKS))
     with pytest.raises(RuntimeError):
         host.add_ai_route(route)
-
-
-def test_migration_reads_old_keys_once_and_preserves_plugin_choices():
-    store = FakeSettings({"ollama_host": "", "models": {CHAT: "my-chat", TRANSLATION: ""}})
-    legacy = {"ollama_host": "http://old:11434", "ai_models": {
-        "local": {CHAT: "old-chat", IMAGE_DESCRIPTION: "vision", TRANSLATION: "old-translate",
-                  FIXES: "writer", "unknown": "ignore"},
-        "api": {CHAT: "never-use-cloud"}}}
-    host = FakeHost(settings=store, legacy=legacy)
-    activate(host)
-    assert host.legacy_reads == ["ollama_host", "ai_models"]
-    assert store.saved == {"ollama_host": "", "models": {
-        CHAT: "my-chat", IMAGE_DESCRIPTION: "vision", TRANSLATION: "", FIXES: "writer"}, MIGRATED_KEY: True}
-    assert host.legacy == legacy  # no writes or aliases into SlideMage's settings
-    again = FakeHost(settings=FakeSettings(store.saved), legacy={"ollama_host": "http://changed"})
-    activate(again)
-    assert again.legacy_reads == [] and again.store.save_count == 0
-    assert again.routes["ollama"].default_choice(CHAT) == "my-chat"
-
-
-def test_old_address_and_all_four_models_are_migrated():
-    host = FakeHost(legacy={"ollama_host": " http://other:1234 ", "ai_models": {
-        "local": {task: f"model-{task}" for task in TASKS}}})
-    activate(host)
-    assert ollama_host(host) == "http://other:1234"
-    route = host.routes["ollama"]
-    for task in TASKS:
-        assert route.default_choice(task) == f"model-{task}"
-        assert route.problem(None, task) == ""
-
-
-@pytest.mark.parametrize("legacy", [
-    {}, {"ollama_host": 4, "ai_models": []}, {"ai_models": {"local": "bad"}},
-    {"ai_models": {"local": {CHAT: None, TRANSLATION: [], FIXES: 5}}},
-])
-def test_empty_or_malformed_legacy_settings_are_not_choices(legacy):
-    host = FakeHost(legacy=legacy)
-    activate(host)
-    assert host.store.saved == {MIGRATED_KEY: True}
-    assert all(host.routes["ollama"].default_choice(task) == "" for task in TASKS)
-
-
-def test_failed_migration_save_is_reported_and_retried():
-    store = FakeSettings()
-    store.save_error = OSError("disk full")
-    host = FakeHost(settings=store, legacy={"ollama_host": "http://old"})
-    activate(host)
-    assert not store.get(MIGRATED_KEY)
-    assert host.messages == [("Could not save Ollama settings: disk full", True)]
-    assert "ollama" in host.routes
-    store.save_error = None
-    again = FakeHost(settings=store)
-    activate(again)
-    assert again.legacy_reads == ["ollama_host", "ai_models"]
-    assert store.saved["ollama_host"] == "http://old" and store.saved[MIGRATED_KEY]
 
 
 def test_address_precedence_and_provider_captures_settings(monkeypatch):
@@ -121,18 +67,23 @@ def test_address_precedence_and_provider_captures_settings(monkeypatch):
 def test_local_problem_text_and_no_fallback(task):
     route = OllamaRoute(FakeHost())
     expected = f"Choose an Ollama model for {TASK_LABELS[task].lower()} under AI setup (the ▾ of the AI switch)."
-    assert route.default_choice(task) == "" and route.problem(None, task) == expected
-    with pytest.raises(ProviderError) as caught:
-        route.provider(None, SimpleNamespace(task=task, model=""))
-    assert str(caught.value) == expected
-    # A picker's explicit choice works even when there is no saved default.
-    resolved = SimpleNamespace(task=task, model="explicit")
-    assert route.provider(None, resolved).model == "explicit"
+    missing = Route("ollama", task, "")
+    resolved = Route("ollama", task, "qwen3:32b")
+    assert route.default_choice(task) == "" and route.problem(None, missing) == expected
+    assert route.problem(None, resolved) == ""
+    assert route.provider(None, missing).model == ""
+    assert route.provider(None, resolved).model == "qwen3:32b"
     assert route.provider(None, resolved) is not route.provider(None, resolved)
-    assert route.choice_label("qwen3:32b") == "qwen3:32b"
-    assert all(getattr(route, name)(None, resolved) is None for name in (
-        "draft_backend", "translation_backend", "slide_translator", "task_runner"))
-    assert route.chat_surface() is None
+    assert route.choice_label(resolved.model) == resolved.model
+    assert route.split_choice(resolved.model) == (resolved.model, None)
+    assert route.valid_choice(None, resolved.model) and not route.valid_choice(None, "")
+    assert route.work_label(resolved) == "qwen3:32b · Ollama"
+    assert route.work_label(missing) == "no model chosen · Ollama"
+    assert route.draft_backend(None, resolved, cancel=object()) is None
+    assert route.translation_backend(None, resolved, cancel=object()) is None
+    assert route.slide_translator(None, resolved) is None
+    assert route.task_runner(None, resolved) is None
+    assert route.chat_surface() is None and route.settings_section() is None
 
 
 def test_model_choices_use_a_worker_and_filter_capabilities(monkeypatch):

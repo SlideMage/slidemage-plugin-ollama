@@ -5,12 +5,12 @@ API key and no per-image cost.
 
 Ollama is stdlib (``http.client`` -- not ``urllib.request`` -- because a running request must be abortable
 from another thread by closing its socket, which urlopen() gives no handle for; see abort()). The
-abortable JSON-over-HTTP plumbing and provider-neutral types come from the local host draft.
+abortable JSON-over-HTTP plumbing is local; neutral types come from the public API.
 
 A provider is bound to one model; callers hold prompts and result checks, never HTTP.
 
 The agent chat drives a provider through stream_turn(): one streamed model turn over provider-neutral
-messages and tools (ollama.host until the public AI API exists).
+messages and tools from slidemage.plugin_api.
 """
 from __future__ import annotations
 
@@ -22,10 +22,14 @@ import uuid
 from collections.abc import Callable
 from dataclasses import dataclass
 
-from .host import (
-    AgentMessage, AssistantMessage, Cancelled, ChatReply, Host, HttpProvider, Message,
-    ProviderError, ToolCall, ToolResultsMessage, ToolSpec, error_detail,
+from slidemage.plugin_api import (
+    AgentMessage, AssistantMessage, Cancelled, ChatReply, Host,
+    ProviderError, ToolCall, ToolResultsMessage, ToolSpec,
 )
+
+from .http import HttpProvider, error_detail
+
+Message = dict[str, str]
 
 AGENT_NUM_CTX = 16384       # Ollama's own default window (as low as 4096) would cut the agent's context
 DEFAULT_OLLAMA_HOST = "http://localhost:11434"

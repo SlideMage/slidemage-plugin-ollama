@@ -1,10 +1,10 @@
 # SPDX-FileCopyrightText: 2026 Stefan Palan, Jürgen Fleiß
 # SPDX-License-Identifier: GPL-3.0-or-later
-"""The Ollama section of Settings → AI, built with the draft host's widgets.
+"""The Ollama section of Settings → AI, built with public host widgets.
 
 Discovery and administration use run_in_background, whose completion callback is
 independent of the page's lifetime. Only the UI callback releases the app-wide
-Ollama slot; workers use a captured address and never access settings or widgets.
+plugin administration slot; workers use a captured address and never access settings or widgets.
 """
 from __future__ import annotations
 
@@ -12,14 +12,41 @@ from collections.abc import Callable
 from typing import TYPE_CHECKING
 
 from PySide6.QtCore import QObject, Qt
-from PySide6.QtWidgets import QAbstractItemView, QLineEdit, QListWidget, QListWidgetItem, QMessageBox
+from PySide6.QtWidgets import (QAbstractItemView, QHBoxLayout, QLineEdit, QListWidget, QListWidgetItem,
+                               QMessageBox, QPushButton, QWidget)
 
 from . import admin
-from .host import Host
+from slidemage.plugin_api import Host
 from .provider import InstalledModel, ollama_host
 
 if TYPE_CHECKING:
     from .route import OllamaRoute
+
+_admin_task: str | None = None
+
+
+def _try_start(host: Host, what: str) -> bool:
+    global _admin_task
+    if _admin_task is not None:
+        host.show_message(f"Ollama is busy: {_admin_task}", error=True)
+        return False
+    _admin_task = what
+    return True
+
+
+def _end() -> None:
+    global _admin_task
+    _admin_task = None
+
+
+def _row(*widgets: QWidget) -> QWidget:
+    row = QWidget()
+    layout = QHBoxLayout(row)
+    layout.setContentsMargins(0, 0, 0, 0)
+    for widget in widgets:
+        layout.addWidget(widget)
+    return row
+
 
 Results = list[tuple[str, bool, str]]      # (model, ok, error)
 
@@ -33,23 +60,19 @@ def _format_size(size: int) -> str:
     return f"{size} B"
 
 
-def _delete_models(host: Host, address: str, models: list[str]) -> Results:
+def _delete_models(address: str, models: list[str]) -> Results:
     results: Results = []
     for model in models:
         ok, error = admin.delete_model(model, address)
         results.append((model, ok, error or "Unknown error"))
-        if ok:
-            host.log(f"Deleted Ollama model {model}")
     return results
 
 
-def _update_models(host: Host, address: str, models: list[str]) -> Results:
+def _update_models(address: str, models: list[str]) -> Results:
     results: Results = []
     for model in models:
-        host.log(f"Updating Ollama model {model}…")
-        ok, error = admin.update_model(model, address, on_progress=host.log)
+        ok, error = admin.update_model(model, address)
         results.append((model, ok, error))
-        host.log(f"Updated Ollama model {model}" if ok else f"Failed to update {model}: {error}")
     return results
 
 
@@ -68,9 +91,9 @@ class OllamaTab(QObject):
         self.host_edit = QLineEdit(ollama_host(host))
         self.host_edit.setPlaceholderText("http://localhost:11434")
         self.host_edit.editingFinished.connect(self._on_host)
-        refresh = host.Button("Refresh", compact=True)
+        refresh = QPushButton("Refresh")
         refresh.clicked.connect(self.refresh)
-        self.page.body.addWidget(host.Field("Ollama address", host.row(self.host_edit, refresh)))
+        self.page.body.addWidget(host.Field("Ollama address", _row(self.host_edit, refresh)))
         self.status = host.caption("")
         self.page.body.addWidget(self.status)
 
@@ -79,11 +102,11 @@ class OllamaTab(QObject):
         self.models_list.setMinimumHeight(190)
         self.models_list.itemSelectionChanged.connect(self._sync_buttons)
         self.page.body.addWidget(host.Field("Installed models", self.models_list))
-        self.update_button = host.Button("Update selected…", compact=True)
+        self.update_button = QPushButton("Update selected…")
         self.update_button.clicked.connect(self._on_update)
-        self.delete_button = host.Button("Delete selected…", compact=True)
+        self.delete_button = QPushButton("Delete selected…")
         self.delete_button.clicked.connect(self._on_delete)
-        self.page.body.addWidget(host.row(host.caption(
+        self.page.body.addWidget(_row(host.caption(
             "Update pulls the latest weights (a custom model you built with ollama create is relinked to "
             "its refreshed base). Delete removes the files from disk and cannot be undone short of "
             "pulling the model again."), self.update_button, self.delete_button))
@@ -149,7 +172,7 @@ class OllamaTab(QObject):
         if not models:
             return
         what = f"deleting {len(models)} model(s)" if len(models) > 1 else f"deleting {models[0]}"
-        if not self.host.try_start_ollama_task(what):
+        if not _try_start(self.host, what):
             return
         detail = (f'"{models[0]}"' if len(models) == 1 else
                   f"these {len(models)} models:\n\n" + "\n".join(f"  • {m}" for m in models))
@@ -162,13 +185,13 @@ class OllamaTab(QObject):
                 "shares its files: like \"ollama rm\", Ollama only removes files no other installed model "
                 "still references.")
         except BaseException:
-            self.host.end_ollama_task()
+            _end()
             raise
         if confirm != QMessageBox.StandardButton.Yes:
-            self.host.end_ollama_task()
+            _end()
             return
-        host, address = self.host, ollama_host(self.host)
-        self._run(lambda: _delete_models(host, address, models), "Deleted", "Delete failed")
+        address = ollama_host(self.host)
+        self._run(lambda: _delete_models(address, models), "Deleted", "Delete failed")
 
     def _on_update(self) -> None:
         models = self.selected()
@@ -183,11 +206,11 @@ class OllamaTab(QObject):
             "cannot be cancelled once started.")
         if confirm != QMessageBox.StandardButton.Yes:
             return
-        if not self.host.try_start_ollama_task(
+        if not _try_start(self.host,
                 f"updating {len(models)} model(s)" if len(models) > 1 else f"updating {models[0]}"):
             return
-        host, address = self.host, ollama_host(self.host)
-        self._run(lambda: _update_models(host, address, models), "Updated", "Update failed")
+        address = ollama_host(self.host)
+        self._run(lambda: _update_models(address, models), "Updated", "Update failed")
 
     def _run(self, work: Callable[[], Results], done: str, failed_title: str) -> None:
         self._busy = True
@@ -197,12 +220,14 @@ class OllamaTab(QObject):
         host = self.host
 
         def finished(results: Results | None, error: BaseException | None) -> None:
-            host.end_ollama_task()  # UI thread, even after the page was destroyed
+            _end()  # UI thread, even after the page was destroyed
             self._busy = False
             if error is not None:
                 host.log(f"{failed_title}: {error}")
                 host.show_message(f"{failed_title}: {type(error).__name__}: {error}", error=True)
             else:
+                for model, ok, detail in results or []:
+                    host.log(f"{done} Ollama model {model}" if ok else f"{failed_title} for {model}: {detail}")
                 failures = [(model, error) for model, ok, error in results or [] if not ok]
                 if failures:
                     host.show_message(

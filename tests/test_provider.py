@@ -11,7 +11,7 @@ import time
 import pytest
 
 from ollama.provider import OllamaProvider
-from ollama.host import (
+from slidemage.plugin_api import (
     AssistantMessage, Cancelled, ProviderError, ToolCall, ToolResult, ToolResultsMessage, ToolSpec, UserMessage,
 )
 from fake_http import ollama_ndjson
@@ -115,7 +115,7 @@ def test_the_socket_is_known_before_the_body_goes_out_and_a_reset_is_not_unreach
         def close(self):
             pass
 
-    monkeypatch.setattr("ollama.host.http.client.HTTPConnection", Connection)
+    monkeypatch.setattr("ollama.http.http.client.HTTPConnection", Connection)
     provider = OllamaProvider("m", host="http://ollama.test")
     with pytest.raises(ProviderError, match="dropped the connection"):
         provider.chat([{"role": "user", "content": "a"}])
@@ -140,7 +140,7 @@ def test_capabilities_are_asked_once_per_model(server):
     assert OllamaProvider("m", host="http://127.0.0.1:9").capabilities() == ()
 
 
-def test_stream_turn_uses_the_draft_agent_types(server):
+def test_stream_turn_uses_the_public_agent_types(server):
     server.routes["/api/show"] = (200, {"capabilities": ["tools", "vision"]})
     server.body = ollama_ndjson(["Hello", " world"], [("inspect", {"slide": "one"})])
     messages = [UserMessage("hi"), AssistantMessage(tool_calls=[ToolCall("previous", "render", {})]),
@@ -158,7 +158,7 @@ def test_stream_turn_uses_the_draft_agent_types(server):
     assert request["tools"][0]["function"]["name"] == "inspect"
 
 
-def test_stream_errors_and_truncation_use_draft_types(server):
+def test_stream_errors_and_truncation_use_public_types(server):
     provider = OllamaProvider("m", host=server.url)
     server.body = ollama_ndjson(["partial"], done_reason="length")
     assert provider.stream_turn("", [UserMessage("hi")], [], lambda _: None).stop == "max_tokens"

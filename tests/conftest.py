@@ -14,7 +14,7 @@ def server(monkeypatch):
     except PermissionError:
         # Keep exercising HTTP serialization and abort signalling when the
         # runner forbids sockets. Normal CI still tests real loopback TCP.
-        from ollama.host import HttpProvider
+        from ollama.http import HttpProvider
 
         srv = Server(in_memory=True)
         monkeypatch.setattr(HttpProvider, "_connection", staticmethod(srv.connection))

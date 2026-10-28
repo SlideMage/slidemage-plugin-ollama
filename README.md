@@ -8,7 +8,7 @@ address and the models installed there, and updates or deletes them.
   computer, or the `OLLAMA_HOST` environment variable.
 - **Model management.** Update pulls the latest weights of an installed model (a custom model you built with
   `ollama create` is relinked to its refreshed base). Delete removes the model's files from Ollama's store.
-  Both are refused while an AI task is using the Ollama server.
+  The plugin serializes its own administration requests. Coordination with core AI tasks is not yet available.
 
 **Privacy.** When the server is on this computer, nothing leaves the computer: the prompts, the slides and the
 answers stay between SlideMage and Ollama. The plugin contacts only the server address you set, and only for the
@@ -20,8 +20,9 @@ requests.
 
 ## Development
 
-Step 5b is a **draft** against the planned AI host API. `ollama/host.py` defines the local Protocol and neutral
-type stand-ins until `slidemage.plugin_api` provides them. The plugin is not yet integrated with a released host.
+Step 5b uses `slidemage.plugin_api` from SlideMage's `feature/ai-routes` branch. Integration is not yet
+complete: that branch still registers its built-in Ollama route and has hard-coded Ollama settings and model
+discovery. See [the handover](docs/Handover.md) before installing or releasing the plugin.
 
 The plugin follows the [SlideMage plugin template](https://github.com/stpalan/slidemage-plugin-template) and the
 [plugin conventions](https://slidemage.org/plugins/submit/).
@@ -33,9 +34,9 @@ workflow runs it on every push.
 `python build.py` checks and then builds `dist/ollama-<version>.smplugin` (a zip of `plugin.toml`, `LICENSE` and
 the package) and its `.sha256`.
 
-`python -m pytest` runs the tests; the Check workflow runs them too. The draft tests use a FakeHost and need
-pytest and PySide6, without SlideMage on the source path. Qt runs offscreen; the HTTP tests normally use a
-loopback server and fall back to in-memory HTTP streams when socket creation is forbidden.
+Tests require SlideMage's source on `PYTHONPATH`, pytest and PySide6. Qt runs offscreen; HTTP tests normally
+use loopback TCP and fall back to in-memory streams when sockets are forbidden. See the handover for the exact
+commands and limitations.
 
 `docs/PLAN.md` lists the completed import replacements and the remaining host integration work;
 `docs/Handover.md` says where the plugin stands.

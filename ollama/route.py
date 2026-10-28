@@ -1,17 +1,14 @@
 # SPDX-FileCopyrightText: 2026 Stefan Palan, Jürgen Fleiß
 # SPDX-License-Identifier: GPL-3.0-or-later
-"""DRAFT Ollama route for the planned AiRoute contract (host.py).
-
-The plugin's migrated per-task models supply defaults; an explicit resolved model
-always wins. Model pickers read a cache, filled on a host worker on their first
-query or on Refresh in Settings. There is no request during activation.
-"""
+"""Ollama's public AI route and asynchronous installed-model cache."""
 from __future__ import annotations
 
 from collections.abc import Callable
 from typing import Any
 
-from .host import CHAT, IMAGE_DESCRIPTION, TASK_LABELS, TASKS, Host, ProviderError, ResolvedRoute, Widget
+from slidemage.plugin_api import Host, Route, Widget
+
+from .tasks import CHAT, IMAGE_DESCRIPTION, TASK_LABELS, TASKS
 from .provider import InstalledModel, OllamaProvider, ollama_host
 
 
@@ -33,17 +30,23 @@ class OllamaRoute:
         self._loading_at: str | None = None
         self._generation = 0
 
-    def problem(self, ctx: Any, task: str) -> str:
-        """Local resolver wording; do not probe the server or pick a fallback."""
-        return "" if self.default_choice(task) else _missing_model(task)
+    def problem(self, ctx: Any, route: Route) -> str:
+        return "" if route.model else _missing_model(route.task)
 
     def default_choice(self, task: str) -> str:
-        models = self.host.settings().get("models")
-        choice = models.get(task) if isinstance(models, dict) else None
-        return choice if isinstance(choice, str) else ""
+        return ""
 
     def choice_label(self, choice: str) -> str:
         return choice
+
+    def split_choice(self, choice: str) -> tuple[str, str | None]:
+        return choice, None
+
+    def valid_choice(self, ctx: Any, choice: str) -> bool:
+        return bool(choice)
+
+    def work_label(self, route: Route) -> str:
+        return f"{route.model or 'no model chosen'} · Ollama"
 
     def model_choices(self, ctx: Any, task: str) -> list[str]:
         """Return immediately. Only refresh_models' worker contacts Ollama."""
@@ -59,7 +62,7 @@ class OllamaRoute:
     def refresh_models(self, done: Callable[[list[InstalledModel]], None] | None = None) -> None:
         """Refresh the cache off-thread; ignore superseded requests and old addresses.
 
-        DRAFT: the plan has no model-list change notification yet. Core can ask
+        The host has no model-list change notification. Core can ask
         model_choices again after completion; Settings consumes the callback.
         """
         address = ollama_host(self.host)
@@ -86,28 +89,29 @@ class OllamaRoute:
         except Exception as exc:  # scheduling failed before the work started
             finished(None, exc)
 
-    def provider(self, ctx: Any, route: ResolvedRoute) -> OllamaProvider:
-        # The captured choice belongs to this request, even if settings changed meanwhile.
-        if not route.model:
-            raise ProviderError(_missing_model(route.task))
+    def provider(self, ctx: Any, route: Route) -> OllamaProvider:
         return OllamaProvider.for_host(self.host, route.model)
 
-    def draft_backend(self, ctx: Any, route: ResolvedRoute) -> None:
+    def draft_backend(self, ctx: Any, route: Route, cancel: Any = None) -> None:
         return None  # core's image backend wraps provider()
 
-    def translation_backend(self, ctx: Any, route: ResolvedRoute) -> None:
+    def translation_backend(self, ctx: Any, route: Route, cancel: Any = None) -> None:
         return None  # core's translation backend wraps provider()
 
-    def slide_translator(self, ctx: Any, route: ResolvedRoute) -> None:
+    def slide_translator(self, ctx: Any, route: Route) -> None:
         return None  # core wraps provider()
 
-    def task_runner(self, ctx: Any, route: ResolvedRoute) -> None:
+    def task_runner(self, ctx: Any, route: Route) -> None:
         return None  # core's provider_tasks
 
     def chat_surface(self, *args: Any, **kwargs: Any) -> None:
         return None  # core's provider chat view
 
-    def settings_section(self) -> Widget:
+    def settings_section(self) -> None:
+        # Registered through Host.add_settings_section, so core must not build it twice.
+        return None
+
+    def build_settings_section(self) -> Widget:
         from .settings import OllamaTab  # Qt only when Settings opens
 
         return OllamaTab(self.host, self).page

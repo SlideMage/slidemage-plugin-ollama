@@ -9,7 +9,7 @@ import weakref
 import pytest
 
 from fake_host import FakeHost, FakeSettings
-from ollama.host import TRANSLATION
+from ollama.tasks import TRANSLATION
 from ollama.provider import InstalledModel, OllamaProvider
 from ollama.route import OllamaRoute
 
@@ -49,7 +49,7 @@ def test_settings_section_builds_and_discovers_lazily(qapp, monkeypatch):
     monkeypatch.setattr(OllamaProvider, "installed", lambda *_a, **_k: [])
     host = FakeHost()
     route = OllamaRoute(host)
-    page = route.settings_section()
+    page = route.build_settings_section()
     assert len(host.pending) == 1
     page.deleteLater()
     _destroy_pages()
@@ -63,7 +63,7 @@ def test_page_retains_controller_and_callbacks_after_discovery(qapp, monkeypatch
     monkeypatch.setattr(OllamaProvider, "installed", lambda *_a, **_k: [])
     host = FakeHost()
     route = OllamaRoute(host)
-    page = route.settings_section()
+    page = route.build_settings_section()
     controller = weakref.ref(page.findChild(OllamaTab))
     host.finish_next()
     gc.collect()
@@ -108,10 +108,11 @@ def test_busy_slot_prevents_administration(tab, monkeypatch, operation):
     from PySide6.QtWidgets import QMessageBox
 
     monkeypatch.setattr(QMessageBox, "question", lambda *_a: QMessageBox.StandardButton.Yes)
-    tab.host.task = "a drafting batch"
+    from ollama import settings
+    monkeypatch.setattr(settings, "_admin_task", "another plugin administration")
     getattr(tab, f"_on_{operation}")()
-    assert not tab.host.pending and tab.host.task_ends == 0
-    assert tab.host.task == "a drafting batch"
+    assert not tab.host.pending
+    assert settings._admin_task == "another plugin administration"
 
 
 @pytest.mark.parametrize("operation", ["delete", "update"])
@@ -120,8 +121,8 @@ def test_cancelled_confirmation_leaves_no_slot(tab, monkeypatch, operation):
 
     monkeypatch.setattr(QMessageBox, "question", lambda *_a: QMessageBox.StandardButton.No)
     getattr(tab, f"_on_{operation}")()
-    assert tab.host.task is None and not tab.host.pending
-    assert tab.host.task_ends == (1 if operation == "delete" else 0)
+    from ollama import settings
+    assert settings._admin_task is None and not tab.host.pending
 
 
 @pytest.mark.parametrize("operation", ["delete", "update"])
@@ -143,7 +144,8 @@ def test_admin_finishes_after_page_is_destroyed(tab, monkeypatch, operation, out
 
     monkeypatch.setattr(admin, f"{operation}_model", work)
     getattr(tab, f"_on_{operation}")()
-    assert tab.host.task is not None and len(tab.host.pending) == 1
+    from ollama import settings
+    assert settings._admin_task is not None and len(tab.host.pending) == 1
     assert not tab.host_edit.isEnabled() and not tab.update_button.isEnabled()
     tab.host.store.set("ollama_host", "http://changed-while-running")
     tab.page.deleteLater()
@@ -151,7 +153,7 @@ def test_admin_finishes_after_page_is_destroyed(tab, monkeypatch, operation, out
     assert not tab._alive
     tab.host.finish_next()
     assert calls == [("qwen3", "http://original:11434")]
-    assert tab.host.task is None and tab.host.task_ends == 1
+    assert settings._admin_task is None
     assert bool(tab.host.messages) == (outcome != "success")
     if tab.host.messages:
         assert tab.host.messages[-1][1] is True
@@ -163,8 +165,9 @@ def test_scheduling_failure_releases_slot_and_reports_error(tab, monkeypatch):
     from PySide6.QtWidgets import QMessageBox
 
     monkeypatch.setattr(QMessageBox, "question", lambda *_a: QMessageBox.StandardButton.Yes)
+    from ollama import settings
     tab.host.background_error = RuntimeError("no worker available")
     tab._on_delete()
-    assert tab.host.task is None and tab.host.task_ends == 1
+    assert settings._admin_task is None
     assert not tab.host.pending and tab.host_edit.isEnabled()
     assert tab.host.messages == [("Delete failed: RuntimeError: no worker available", True)]
