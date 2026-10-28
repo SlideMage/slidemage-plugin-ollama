@@ -20,6 +20,9 @@ requests.
 
 ## Development
 
+Step 5b is a **draft** against the planned AI host API. `ollama/host.py` defines the local Protocol and neutral
+type stand-ins until `slidemage.plugin_api` provides them. The plugin is not yet integrated with a released host.
+
 The plugin follows the [SlideMage plugin template](https://github.com/stpalan/slidemage-plugin-template) and the
 [plugin conventions](https://slidemage.org/plugins/submit/).
 
@@ -30,11 +33,11 @@ workflow runs it on every push.
 `python build.py` checks and then builds `dist/ollama-<version>.smplugin` (a zip of `plugin.toml`, `LICENSE` and
 the package) and its `.sha256`.
 
-`python -m pytest` runs the tests; the Check workflow runs them too. The tests import SlideMage's
-`slidemage.ai.providers` (and `slidemage.plugin_api` once that is in use), so run them with SlideMage's source on
-the path, for example `PYTHONPATH=../SlideMage/src ../SlideMage/.venv/bin/python -m pytest`.
+`python -m pytest` runs the tests; the Check workflow runs them too. The draft tests use a FakeHost and need
+pytest and PySide6, without SlideMage on the source path. Qt runs offscreen; the HTTP tests normally use a
+loopback server and fall back to in-memory HTTP streams when socket creation is forbidden.
 
-`docs/PLAN.md` lists the SlideMage imports the package still has and what replaces each of them;
+`docs/PLAN.md` lists the completed import replacements and the remaining host integration work;
 `docs/Handover.md` says where the plugin stands.
 
 ### Releasing a version

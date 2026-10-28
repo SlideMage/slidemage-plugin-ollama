@@ -13,9 +13,6 @@ jobs:
         with:
           python-version: "3.12"
       - run: python build.py --check
-      # The tests import SlideMage (slidemage.ai.providers now, slidemage.plugin_api from step 5b). For now from the
-      # branch with the plugin host; switch to the release tag (@v10.0.0) once it is released. The SlideMage repository
-      # is private: this step needs a token with read access (for example a secret in the URL,
-      # https://x-access-token:$TOKEN@github.com/...) or a public SlideMage.
-      - run: pip install pytest PySide6 "git+https://github.com/stpalan/SlideMage.git@feature/plugin-host"
+      # The host and AI types are local drafts until the AI plugin API exists.
+      - run: pip install pytest PySide6
       - run: python -m pytest -q

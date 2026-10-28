@@ -7,5 +7,5 @@ summary = "Local AI models through Ollama: nothing leaves your computer."
 author = "Stefan Palan"
 homepage = "https://github.com/stpalan/slidemage-plugin-ollama"
 license = "GPL-3.0-or-later"
-needs = ["Ollama installed (ollama.com) and a model pulled"]
+needs = ["Ollama installed"]
 network = ["The Ollama server you set (by default on this computer)"]

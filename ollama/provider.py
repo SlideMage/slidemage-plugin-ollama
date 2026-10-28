@@ -5,30 +5,36 @@ API key and no per-image cost.
 
 Ollama is stdlib (``http.client`` -- not ``urllib.request`` -- because a running request must be abortable
 from another thread by closing its socket, which urlopen() gives no handle for; see abort()). The
-abortable JSON-over-HTTP plumbing is _HttpProvider, which is still SlideMage's (slidemage.ai.providers),
-as are the other provider-neutral names this module imports from there.
+abortable JSON-over-HTTP plumbing and provider-neutral types come from the local host draft.
 
 A provider is bound to one model; callers hold prompts and result checks, never HTTP.
 
 The agent chat drives a provider through stream_turn(): one streamed model turn over provider-neutral
-messages and tools (slidemage.ai.agent_types).
+messages and tools (ollama.host until the public AI API exists).
 """
 from __future__ import annotations
 
 import base64
 import json
+import os
 import re
 import uuid
 from collections.abc import Callable
 from dataclasses import dataclass
 
-from slidemage import app_settings
-from slidemage.ai.agent_types import AgentMessage, AssistantMessage, ToolCall, ToolResultsMessage, ToolSpec
-from slidemage.ai.providers import (     # neutral: they move to slidemage.plugin_api (step 5b)
-    Cancelled, ChatReply, Message, ProviderError, _error_detail, _HttpProvider)
-from slidemage.project import ProjectContext
+from .host import (
+    AgentMessage, AssistantMessage, Cancelled, ChatReply, Host, HttpProvider, Message,
+    ProviderError, ToolCall, ToolResultsMessage, ToolSpec, error_detail,
+)
 
 AGENT_NUM_CTX = 16384       # Ollama's own default window (as low as 4096) would cut the agent's context
+DEFAULT_OLLAMA_HOST = "http://localhost:11434"
+
+
+def ollama_host(host: Host) -> str:
+    """Saved address, then $OLLAMA_HOST, then localhost; an empty override is unset."""
+    saved = host.settings().get("ollama_host")
+    return (saved.strip() if isinstance(saved, str) else "") or os.environ.get("OLLAMA_HOST") or DEFAULT_OLLAMA_HOST
 
 
 # Ollama older than 0.6.4 reports no capabilities; these model families call tools (checked by name).
@@ -53,22 +59,22 @@ class InstalledModel:
         return bool(_TOOL_FAMILIES_RE.match(self.name.rsplit("/", 1)[-1]))
 
 
-class OllamaProvider(_HttpProvider):
+class OllamaProvider(HttpProvider):
     """Local Ollama. No API key, no per-image cost, nothing leaves the machine."""
 
     service = "Ollama"
     is_local = True
 
-    def __init__(self, model: str = "", host: str = app_settings.DEFAULT_OLLAMA_HOST) -> None:
+    def __init__(self, model: str = "", host: str = DEFAULT_OLLAMA_HOST) -> None:
         super().__init__()
         self.model = model
         self.host = host
         self._capabilities: dict[str, tuple[str, ...]] = {}     # what /api/show said, by model
 
     @classmethod
-    def for_project(cls, ctx: ProjectContext, model: str = "") -> "OllamaProvider":
-        """On the project's Ollama host, read now: a host saved later in Settings applies to the next provider."""
-        return cls(model, app_settings.get_ollama_host(ctx))
+    def for_host(cls, host: Host, model: str = "") -> "OllamaProvider":
+        """Capture this machine's address now; later settings apply to the next provider."""
+        return cls(model, ollama_host(host))
 
     @property
     def label(self) -> str:
@@ -135,7 +141,7 @@ class OllamaProvider(_HttpProvider):
         with self._request("POST", self.host, "/api/chat", headers={"Content-Type": "application/json"},
                            payload=payload, timeout=timeout) as response:
             if response.status != 200:
-                raise ProviderError(self._chat_error(_error_detail(response.read()), response.status))
+                raise ProviderError(self._chat_error(error_detail(response.read()), response.status))
             for line in response:
                 if self._cancelled:
                     raise Cancelled("Aborted.")

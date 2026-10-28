@@ -6,11 +6,15 @@ from __future__ import annotations
 
 import base64
 import threading
+import time
 
 import pytest
 
 from ollama.provider import OllamaProvider
-from slidemage.ai.providers import Cancelled, ProviderError   # neutral: moves to slidemage.plugin_api (step 5b)
+from ollama.host import (
+    AssistantMessage, Cancelled, ProviderError, ToolCall, ToolResult, ToolResultsMessage, ToolSpec, UserMessage,
+)
+from fake_http import ollama_ndjson
 
 PNG = b"\x89PNG\r\n\x1a\n" + b"fake"
 
@@ -78,8 +82,11 @@ def test_abort_ends_a_running_request(server):
 
     thread = threading.Thread(target=run)
     thread.start()
+    deadline = time.monotonic() + 5
     while not server.requests:
         thread.join(0.01)
+        assert thread.is_alive(), "the request ended before it reached the server"
+        assert time.monotonic() < deadline, "the request never reached the server"
     provider.abort()
     thread.join(5)
     assert not thread.is_alive()
@@ -108,7 +115,7 @@ def test_the_socket_is_known_before_the_body_goes_out_and_a_reset_is_not_unreach
         def close(self):
             pass
 
-    monkeypatch.setattr("slidemage.ai.providers.http.client.HTTPConnection", Connection)
+    monkeypatch.setattr("ollama.host.http.client.HTTPConnection", Connection)
     provider = OllamaProvider("m", host="http://ollama.test")
     with pytest.raises(ProviderError, match="dropped the connection"):
         provider.chat([{"role": "user", "content": "a"}])
@@ -131,3 +138,30 @@ def test_capabilities_are_asked_once_per_model(server):
     server.status, server.body = 404, {"error": "model 'm' not found"}
     assert OllamaProvider("m", host=server.url).capabilities() == ()
     assert OllamaProvider("m", host="http://127.0.0.1:9").capabilities() == ()
+
+
+def test_stream_turn_uses_the_draft_agent_types(server):
+    server.routes["/api/show"] = (200, {"capabilities": ["tools", "vision"]})
+    server.body = ollama_ndjson(["Hello", " world"], [("inspect", {"slide": "one"})])
+    messages = [UserMessage("hi"), AssistantMessage(tool_calls=[ToolCall("previous", "render", {})]),
+                ToolResultsMessage([ToolResult("previous", "rendered", images=[PNG])])]
+    texts = []
+    reply = OllamaProvider("m", host=server.url).stream_turn(
+        "be brief", messages, [ToolSpec("inspect", "Inspect a slide", {"type": "object"})], texts.append)
+    assert isinstance(reply, AssistantMessage)
+    assert texts == ["Hello", " world"] and reply.text == "Hello world"
+    assert reply.stop == "tool_use" and reply.usage == {"input": 12, "output": 5}
+    assert (reply.tool_calls[0].name, reply.tool_calls[0].input) == ("inspect", {"slide": "one"})
+    request = server.requests[-1]["body"]
+    assert request["messages"][-2] == {"role": "tool", "content": "rendered", "tool_name": "render"}
+    assert request["messages"][-1]["images"] == [base64.b64encode(PNG).decode()]
+    assert request["tools"][0]["function"]["name"] == "inspect"
+
+
+def test_stream_errors_and_truncation_use_draft_types(server):
+    provider = OllamaProvider("m", host=server.url)
+    server.body = ollama_ndjson(["partial"], done_reason="length")
+    assert provider.stream_turn("", [UserMessage("hi")], [], lambda _: None).stop == "max_tokens"
+    server.body = '{"error": "model does not support tools"}\n'
+    with pytest.raises(ProviderError, match="m cannot call tools"):
+        provider.stream_turn("", [UserMessage("hi")], [], lambda _: None)
