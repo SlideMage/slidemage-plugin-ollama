@@ -1,8 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Stefan Palan, Jürgen Fleiß
 # SPDX-License-Identifier: GPL-3.0-or-later
-"""ChatProvider implementations against a throwaway local HTTP server (no
-external network): request shape, response parsing, error mapping; plus the
-API-key sources. (The route resolver and its settings are in test_ai_profile.py.)"""
+"""OllamaProvider against a throwaway local HTTP server (no external network): request shape, response
+parsing, error mapping, abort, capabilities. The server is the `server` fixture (conftest.py)."""
 from __future__ import annotations
 
 import base64
@@ -10,38 +9,10 @@ import threading
 
 import pytest
 
-from slidemage import app_settings
-from slidemage.ai import credentials
-from slidemage.ai.anthropic_provider import AnthropicProvider
-from slidemage.ai.providers import (
-    Cancelled,
-    OllamaProvider,
-    ProviderError,
-    parse_json_object,
-)
-
-from fake_http import api_key_of, message_sse
+from ollama.provider import OllamaProvider
+from slidemage.ai.providers import Cancelled, ProviderError   # neutral: moves to slidemage.plugin_api (step 5b)
 
 PNG = b"\x89PNG\r\n\x1a\n" + b"fake"
-
-
-@pytest.fixture
-def settings(tmp_path, monkeypatch):
-    """Isolated app_settings.json and project root (the tests run against
-    the example project, whose files must stay untouched)."""
-    return tmp_path
-
-
-def anthropic(server, **kwargs):
-    provider = AnthropicProvider(api_key=kwargs.pop("api_key", "sk-test"), **kwargs)
-    provider.base_url = server.url
-    provider.max_retries = 0     # an error answer is the test; the backoff would only slow it
-    return provider
-
-
-def answer_with(server, content, stop_reason="end_turn"):
-    server.body = message_sse(content, stop_reason)
-    server.content_type = "text/event-stream"
 
 
 # -- Ollama ------------------------------------------------------------------
@@ -160,175 +131,3 @@ def test_capabilities_are_asked_once_per_model(server):
     server.status, server.body = 404, {"error": "model 'm' not found"}
     assert OllamaProvider("m", host=server.url).capabilities() == ()
     assert OllamaProvider("m", host="http://127.0.0.1:9").capabilities() == ()
-
-
-# -- Anthropic ---------------------------------------------------------------
-
-def test_abort_before_the_request_ends_it_without_connecting(server):
-    provider = anthropic(server)
-    provider.abort()
-    with pytest.raises(Cancelled):
-        provider.chat([{"role": "user", "content": "hi"}])
-    assert not server.requests
-
-
-def test_anthropic_request_shape_with_image_and_json_mode(server):
-    answer_with(server, [{"type": "text", "text": "{\"a\": 1}"}])
-    provider = anthropic(server)
-    reply = provider.chat(
-        [{"role": "user", "content": "describe"}], system="sys", images=[PNG],
-        schema={"type": "object"}, max_tokens=123, temperature=0.9, think=True, num_ctx=1)
-    request = server.requests[0]
-    assert (request["method"], request["path"]) == ("POST", "/v1/messages")
-    assert api_key_of(request) == "sk-test"
-    assert request["headers"]["anthropic-version"] == "2023-06-01"
-    assert request["headers"]["content-type"] == "application/json"
-    body = request["body"]
-    assert set(body) == {"model", "max_tokens", "system", "messages", "stream"}
-    assert body["model"] == "claude-sonnet-5-5" and body["max_tokens"] == 123
-    assert body["system"].startswith("sys\n\n") and '"type": "object"' in body["system"]
-    assert body["messages"] == [{"role": "user", "content": [
-        {"type": "image", "source": {
-            "type": "base64", "media_type": "image/png",
-            "data": base64.b64encode(PNG).decode()}},
-        {"type": "text", "text": "describe"}]}]
-    assert reply.text == '{"a": 1}' and not reply.truncated
-    assert parse_json_object(reply.text) == {"a": 1}
-
-
-def test_anthropic_plain_text_turn_has_no_system_and_flags_truncation(server):
-    answer_with(server, [{"type": "text", "text": "cut"}], "max_tokens")
-    reply = anthropic(server, model="claude-haiku-4-5-20251001").chat(
-        [{"role": "user", "content": "hi"}])
-    body = server.requests[0]["body"]
-    assert "system" not in body and "output_config" not in body
-    assert body["model"] == "claude-haiku-4-5-20251001"
-    assert body["messages"] == [{"role": "user", "content": "hi"}]
-    assert reply.truncated
-
-
-def test_anthropic_rejects_unsupported_image_formats(server):
-    with pytest.raises(ProviderError, match="PNG, JPEG, GIF and WebP"):
-        anthropic(server).chat([{"role": "user", "content": "x"}], images=[b"BM bitmap"])
-    assert not server.requests
-
-
-@pytest.mark.parametrize("status, text", [
-    (401, "rejected the API key"), (429, "rate limit"), (529, "overloaded"),
-    (400, "HTTP 400: bad request"),
-])
-def test_anthropic_http_errors_map_to_provider_errors(server, status, text):
-    server.status = status
-    server.body = {"type": "error", "error": {"type": "x", "message": "bad request"}}
-    with pytest.raises(ProviderError, match=text):
-        anthropic(server).chat([{"role": "user", "content": "hi"}])
-
-
-def test_anthropic_network_error_and_missing_key(server):
-    provider = AnthropicProvider(api_key="k")
-    provider.base_url = "http://127.0.0.1:9"
-    provider.max_retries = 0
-    with pytest.raises(ProviderError, match="Anthropic unreachable"):
-        provider.chat([{"role": "user", "content": "hi"}])
-    with pytest.raises(ProviderError, match="No Anthropic API key"):
-        AnthropicProvider(api_key="").chat([{"role": "user", "content": "hi"}])
-
-
-def test_anthropic_lists_models(server):
-    server.body = {"data": [{"id": "claude-opus-5-5"}, {"id": "claude-sonnet-5-5"}]}
-    assert anthropic(server).list_models() == ["claude-opus-5-5", "claude-sonnet-5-5"]
-    assert server.requests[0]["path"].startswith("/v1/models")
-    server.status = 401
-    assert anthropic(server).list_models() == []
-
-
-def test_anthropic_list_models_follows_the_pages(server):
-    server.routes = {
-        "/v1/models?limit=1000": (200, {"data": [{"id": "a"}, {"id": "b"}], "has_more": True, "last_id": "b"}),
-        "/v1/models?limit=1000&after_id=b": (200, {"data": [{"id": "c"}], "has_more": False, "last_id": "c"}),
-    }
-    provider = anthropic(server)
-    assert provider.list_models() == ["a", "b", "c"]
-    assert [r["path"] for r in server.requests] == list(server.routes)
-    assert server.requests[0]["headers"]["x-api-key"] == "sk-test"
-    assert anthropic(server, api_key="").list_models() == []
-
-
-def test_parse_json_object_tolerates_fences_think_blocks_and_prose():
-    assert parse_json_object('```json\n{"a": 1}\n```') == {"a": 1}
-    assert parse_json_object('<think>x</think>{"a": 1}') == {"a": 1}
-    assert parse_json_object('Sure! {"a": 1} done') == {"a": 1}
-    assert parse_json_object("[1]") is None and parse_json_object("") is None
-
-
-# -- API key -----------------------------------------------------------------
-
-class FakeKeyring:
-    def __init__(self, fail=False):
-        self.store, self.fail = {}, fail
-
-    def get_password(self, service, user):
-        return self.store.get((service, user))
-
-    def set_password(self, service, user, value):
-        if self.fail:
-            raise RuntimeError("no backend")
-        self.store[(service, user)] = value
-
-    def delete_password(self, service, user):
-        self.store.pop((service, user), None)
-
-
-def test_api_key_source_precedence(ctx, settings, monkeypatch):
-    keyring = FakeKeyring()
-    monkeypatch.setattr(credentials, "_keyring", lambda: keyring)
-    assert credentials.get_api_key(ctx) is None
-
-    app_settings.set(ctx, credentials.FILE_SETTING_KEY, "file-key")
-    assert credentials.get_api_key(ctx) == credentials.ApiKey("file-key", "settings file")
-    keyring.set_password("SlideMage", "anthropic-api-key", "ring-key")
-    assert credentials.get_api_key(ctx) == credentials.ApiKey("ring-key", "keychain")
-    monkeypatch.setenv("ANTHROPIC_API_KEY", " env-key ")
-    assert credentials.get_api_key(ctx) == credentials.ApiKey("env-key", "environment")
-
-
-def test_set_api_key_prefers_the_keychain_and_keeps_one_copy(ctx, settings, monkeypatch):
-    keyring = FakeKeyring()
-    monkeypatch.setattr(credentials, "_keyring", lambda: keyring)
-    app_settings.set(ctx, credentials.FILE_SETTING_KEY, "stale")
-    assert credentials.set_api_key(ctx, "k1") == "keychain"
-    assert credentials.get_api_key(ctx) == credentials.ApiKey("k1", "keychain")
-    assert app_settings.get(ctx, credentials.FILE_SETTING_KEY) is None
-    assert credentials.set_api_key(ctx, "") == ""
-    assert credentials.get_api_key(ctx) is None
-
-
-def test_set_api_key_falls_back_to_the_settings_file(ctx, settings, monkeypatch):
-    # No keyring installed...
-    assert credentials.set_api_key(ctx, "k2") == "settings file"
-    assert credentials.get_api_key(ctx) == credentials.ApiKey("k2", "settings file")
-    credentials.set_api_key(ctx, "")
-    assert credentials.get_api_key(ctx) is None
-    # ...or one with no usable backend.
-    monkeypatch.setattr(credentials, "_keyring", lambda: FakeKeyring(fail=True))
-    assert credentials.set_api_key(ctx, "k3") == "settings file"
-
-
-def test_keychain_is_available_only_with_a_real_backend(monkeypatch):
-    class Backend:
-        def __init__(self, priority):
-            self.priority = priority
-
-    class Keyring:
-        def __init__(self, backend):
-            self.backend = backend
-
-        def get_keyring(self):
-            if isinstance(self.backend, Exception):
-                raise self.backend
-            return self.backend
-
-    assert not credentials.keychain_available()                               # keyring not installed
-    for backend, expected in ((Backend(5), True), (Backend(0), False), (RuntimeError("broken"), False)):
-        monkeypatch.setattr(credentials, "_keyring", lambda backend=backend: Keyring(backend))
-        assert credentials.keychain_available() is expected

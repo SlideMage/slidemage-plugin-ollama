@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Stefan Palan, Jürgen Fleiß
 # SPDX-License-Identifier: GPL-3.0-or-later
-"""A throwaway local HTTP server standing in for Ollama and the Anthropic API (no external
-network), and the streaming wire formats of both for it to answer with."""
+"""A throwaway local HTTP server standing in for Ollama (no external network), and the streaming
+wire format of its /api/chat for it to answer with."""
 from __future__ import annotations
 
 import json
@@ -83,45 +83,6 @@ class Server:
         self.httpd.server_close()
 
 
-def _event(name: str, data: dict) -> str:
-    return f"event: {name}\ndata: {json.dumps(data)}\n\n"
-
-
-def sse_events(*events: dict) -> str:
-    """Server-sent events from raw event dicts (each has its `type`), for streams message_sse cannot
-    make: thinking blocks, a tool input in several pieces, events of a type nobody knows, an error."""
-    return "".join(_event(e["type"], e) for e in events)
-
-
-def message_sse(content: list[dict], stop_reason: str = "end_turn", usage: dict | None = None) -> str:
-    """The server-sent events of a streamed message made of `content` blocks: {"type": "text",
-    "text"} (streamed in two pieces) or {"type": "tool_use", "id", "name", "input"}."""
-    usage = {"input_tokens": 10, "output_tokens": 1, **(usage or {})}
-    out = [_event("message_start", {"type": "message_start", "message": {
-        "id": "msg_1", "type": "message", "role": "assistant", "model": "claude-test", "content": [],
-        "stop_reason": None, "stop_sequence": None, "usage": usage}})]
-    for index, block in enumerate(content):
-        if block["type"] == "text":
-            half = len(block["text"]) // 2
-            out.append(_event("content_block_start", {"type": "content_block_start", "index": index,
-                                                      "content_block": {"type": "text", "text": ""}}))
-            for piece in (block["text"][:half], block["text"][half:]):
-                out.append(_event("content_block_delta", {"type": "content_block_delta", "index": index,
-                                                          "delta": {"type": "text_delta", "text": piece}}))
-        else:
-            out.append(_event("content_block_start", {"type": "content_block_start", "index": index,
-                                                      "content_block": {**block, "input": {}}}))
-            out.append(_event("content_block_delta", {"type": "content_block_delta", "index": index,
-                                                      "delta": {"type": "input_json_delta",
-                                                                "partial_json": json.dumps(block["input"])}}))
-        out.append(_event("content_block_stop", {"type": "content_block_stop", "index": index}))
-    out.append(_event("message_delta", {"type": "message_delta",
-                                        "delta": {"stop_reason": stop_reason, "stop_sequence": None},
-                                        "usage": {"output_tokens": usage["output_tokens"]}}))
-    out.append(_event("message_stop", {"type": "message_stop"}))
-    return "".join(out)
-
-
 def ollama_ndjson(pieces=(), tool_calls=(), done_reason: str = "stop") -> str:
     """The lines /api/chat streams: one per text piece, then one carrying `tool_calls` (a list of
     (name, arguments) pairs, each whole), then the closing statistics."""
@@ -133,12 +94,6 @@ def ollama_ndjson(pieces=(), tool_calls=(), done_reason: str = "stop") -> str:
     lines.append({"model": "m", "message": {"role": "assistant", "content": ""}, "done": True,
                   "done_reason": done_reason, "prompt_eval_count": 12, "eval_count": 5})
     return "".join(json.dumps(line) + "\n" for line in lines)
-
-
-def api_key_of(request) -> str:
-    """The key a request carries: AnthropicProvider sends it as x-api-key (a Bearer token is read too)."""
-    headers = request["headers"]
-    return headers.get("x-api-key") or headers.get("authorization", "").removeprefix("Bearer ")
 
 
 def wait_for_first_piece(thread, texts, seconds=5.0):

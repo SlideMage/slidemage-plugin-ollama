@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Stefan Palan, Jürgen Fleiß
 # SPDX-License-Identifier: GPL-3.0-or-later
 """The Ollama tab of the Settings sheet: the server's address, and the models installed there --
-update (pull) and delete, as `ollama pull` and `ollama rm` would (ai/ollama_admin.py).
+update (pull) and delete, as `ollama pull` and `ollama rm` would (ollama/admin.py).
 
 Deleting removes a model from Ollama's own store, not from a list SlideMage keeps. Both actions take
 the app-wide Ollama slot (`app.try_start_ollama_task`), so a model is not deleted or re-pulled under
@@ -15,11 +15,12 @@ from typing import Callable
 from PySide6.QtCore import QThread, Qt, Signal
 from PySide6.QtWidgets import QAbstractItemView, QLineEdit, QListWidget, QListWidgetItem, QMessageBox
 
-from ... import app_settings, deck_snapshot
-from ...ai import ollama_admin
-from ...ai.providers import InstalledModel
-from .. import background
-from ..kit.widgets import Button, Field, Page, caption, row
+from slidemage import app_settings, deck_snapshot                          # step 5b: host calls
+from slidemage.ui import background                                          # step 5b: host.start_detached
+from slidemage.ui.kit.widgets import Button, Field, Page, caption, row      # step 5b: host widgets
+
+from . import admin as ollama_admin
+from .provider import InstalledModel
 
 Results = list[tuple[str, bool, str]]      # (model, ok, error)
 
