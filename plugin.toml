@@ -2,7 +2,7 @@ id = "ollama"
 name = "Ollama"
 version = "1.0.0"
 api_version = 1
-requires_slidemage = ">=10.0"
+requires_slidemage = ">=9.1"
 summary = "Local AI models through Ollama: nothing leaves your computer."
 author = "Stefan Palan"
 homepage = "https://github.com/SlideMage/slidemage-plugin-ollama"
