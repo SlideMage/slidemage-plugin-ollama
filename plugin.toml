@@ -1,6 +1,6 @@
 id = "ollama"
 name = "Ollama"
-version = "1.0.0"
+version = "1.0.1"
 api_version = 1
 requires_slidemage = ">=9.1"
 summary = "Local AI models through Ollama: nothing leaves your computer."
