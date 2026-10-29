@@ -15,6 +15,8 @@ jobs:
       - run: python build.py --check
       # The tests import slidemage.plugin_api, from SlideMage's develop branch (public, in the SlideMage organization);
       # switch to the release tag (@v9.1.0) once it is released.
+      # Qt's widget tests need these system libraries, which the runner image lacks.
+      - run: sudo apt-get update && sudo apt-get install -y libegl1 libgl1 libxkbcommon0 libfontconfig1 libdbus-1-3
       - run: pip install pytest PySide6 "git+https://github.com/SlideMage/SlideMage.git@develop"
       - run: python -m pytest -q
         env:
