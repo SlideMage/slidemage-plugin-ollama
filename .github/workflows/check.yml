@@ -13,6 +13,9 @@ jobs:
         with:
           python-version: "3.12"
       - run: python build.py --check
-      # The host and AI types are local drafts until the AI plugin API exists.
-      - run: pip install pytest PySide6
+      # The tests import slidemage.plugin_api, from SlideMage's develop branch (public, in the SlideMage organization);
+      # switch to the release tag (@v9.1.0) once it is released.
+      - run: pip install pytest PySide6 "git+https://github.com/SlideMage/SlideMage.git@develop"
       - run: python -m pytest -q
+        env:
+          QT_QPA_PLATFORM: offscreen
