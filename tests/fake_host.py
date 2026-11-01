@@ -61,6 +61,7 @@ class FakeHost:
         self.changed_routes: list[str] = []
         self.legacy_address: str | None = None
         self.route_tasks: dict[str, str] = {}
+        self.deliver_progress: Callable[[], None] = lambda: None
         self._active = True
         self._ui_thread = get_ident()
 
@@ -141,10 +142,15 @@ class FakeHost:
         def run():
             return work(reports.append)
 
+        def deliver():
+            while reports:
+                progress(reports.pop(0))
+
         def finished(result, error):
-            for value in reports:
-                progress(value)
+            deliver()
             done(result, error)
+
+        self.deliver_progress = deliver  # lets a test see the page between progress and done
 
         self.run_in_background(run, finished)
 

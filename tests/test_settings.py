@@ -8,6 +8,7 @@ import weakref
 
 import pytest
 
+from ollama.admin import Progress
 from fake_host import FakeHost, FakeSettings
 from ollama.tasks import TRANSLATION
 from ollama.provider import InstalledModel, OllamaProvider
@@ -135,7 +136,7 @@ def test_admin_finishes_after_page_is_destroyed(tab, monkeypatch, operation, out
     def work(model, address, **kwargs):
         calls.append((model, address))
         if "on_progress" in kwargs:
-            kwargs["on_progress"]("pulling weights")
+            kwargs["on_progress"](Progress("pulling weights"))
         if outcome == "exception":
             raise ValueError("broken reply")
         return outcome == "success", "" if outcome == "success" else "server refused"
@@ -151,11 +152,10 @@ def test_admin_finishes_after_page_is_destroyed(tab, monkeypatch, operation, out
     tab.host.finish_next()
     assert calls == [("qwen3", "http://original:11434")]
     if operation == "update":
-        assert "pulling weights" in tab.host.logs
+        assert ("pulling weights", False) in tab.host.messages  # progress goes to the main window now
     assert not tab.host.route_tasks
-    assert bool(tab.host.messages) == (outcome != "success")
-    if tab.host.messages:
-        assert tab.host.messages[-1][1] is True
+    errors = [message for message in tab.host.messages if message[1]]
+    assert bool(errors) == (outcome != "success")
     tab.host.finish_next()  # refresh the route's cache, without the page
     assert tab.route.model_choices(tab.host.context(), TRANSLATION) == ["qwen3"]
 
@@ -181,3 +181,72 @@ def test_confirmation_error_releases_shared_lease(tab, monkeypatch):
     with pytest.raises(RuntimeError, match="dialog failed"):
         tab._on_delete()
     assert not tab.host.route_tasks
+
+
+def _start_update(tab, monkeypatch, reports):
+    """Starts an update whose work makes `reports`; returns the worker's done callback, with the work run."""
+    from PySide6.QtWidgets import QMessageBox
+    from ollama import admin
+
+    monkeypatch.setattr(QMessageBox, "question", lambda *_a: QMessageBox.StandardButton.Yes)
+
+    def work(model, address, on_progress):
+        for report in reports:
+            on_progress(report)
+        return True, ""
+
+    monkeypatch.setattr(admin, "update_model", work)
+    tab._on_update()
+    run, done = tab.host.pending.pop(0)
+    results = run()
+    return lambda: done(results, None)
+
+
+def test_update_shows_determinate_bar_and_hides_it_afterwards(tab, monkeypatch):
+    assert tab.progress_bar.isHidden()
+    done = _start_update(tab, monkeypatch, [Progress("qwen3: pulling abc (42%)", 0.42)])
+    tab.host.deliver_progress()
+    assert not tab.progress_bar.isHidden()
+    assert (tab.progress_bar.minimum(), tab.progress_bar.maximum(), tab.progress_bar.value()) == (0, 100, 42)
+    assert tab.status.text() == "qwen3: pulling abc (42%)"
+    done()
+    assert tab.progress_bar.isHidden()
+    assert any("Updating Ollama model" in line for line in tab.host.logs)
+    assert not any("42%" in line for line in tab.host.logs)  # no log line per tick
+    tab.host.finish_next()
+
+
+def test_update_without_fraction_is_indeterminate(tab, monkeypatch):
+    done = _start_update(tab, monkeypatch, [Progress("qwen3: pulling manifest")])
+    tab.host.deliver_progress()
+    assert not tab.progress_bar.isHidden()
+    assert (tab.progress_bar.minimum(), tab.progress_bar.maximum()) == (0, 0)
+    done()
+    assert tab.progress_bar.isHidden()
+    tab.host.finish_next()
+
+
+def test_several_models_say_which_one_is_updating(tab, monkeypatch):
+    from ollama.settings import _update_models
+    from ollama import admin
+
+    monkeypatch.setattr(admin, "update_model", lambda *_a, on_progress: on_progress(Progress("x: verifying")) or (True, ""))
+    seen = []
+    _update_models("http://h", ["a", "b"], seen.append)
+    assert [p.text for p in seen] == [
+        "Updating Ollama model a… (model 1 of 2)", "x: verifying (model 1 of 2)",
+        "Updating Ollama model b… (model 2 of 2)", "x: verifying (model 2 of 2)"]
+
+
+def test_delete_shows_indeterminate_bar(tab, monkeypatch):
+    from PySide6.QtWidgets import QMessageBox
+    from ollama import admin
+
+    monkeypatch.setattr(QMessageBox, "question", lambda *_a: QMessageBox.StandardButton.Yes)
+    monkeypatch.setattr(admin, "delete_model", lambda *_a: (True, ""))
+    tab._on_delete()
+    assert not tab.progress_bar.isHidden() and tab.progress_bar.maximum() == 0
+    assert tab.status.text() == "Deleting model…"
+    tab.host.finish_next()
+    assert tab.progress_bar.isHidden()
+    tab.host.finish_next()

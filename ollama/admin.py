@@ -14,12 +14,21 @@ import math
 import re
 import urllib.error
 import urllib.request
+from dataclasses import dataclass
 from typing import Callable
 
 
 # What a call to the server can raise besides a refusal: no connection, a timeout (OSError), a cut-off or
 # malformed reply (HTTPException), a reply that is not UTF-8 text or JSON (ValueError).
 _CALL_ERRORS = (OSError, http.client.HTTPException, ValueError)
+
+
+@dataclass(frozen=True)
+class Progress:
+    """One progress report of a pull: the line to show, and how far the current step is (0.0 to 1.0), or None
+    when the server gave no size. Ollama counts per layer, so the fraction starts over with each layer."""
+    text: str
+    fraction: float | None = None
 
 
 def _open(host: str, path: str, payload: dict, timeout: float, method: str = "POST"):
@@ -106,15 +115,18 @@ def _weights_blob(model: str, host: str) -> str | None:
 
 
 def pull_model(model: str, host: str,
-                on_progress: Callable[[str], None] | None = None) -> tuple[bool, str]:
+                on_progress: Callable[[Progress], None] | None = None) -> tuple[bool, str]:
     """Re-downloads `model` from the Ollama registry via POST /api/pull
     (stream=True) -- an already-up-to-date model just returns "success"
     quickly rather than wasting bandwidth, same as the `ollama pull` CLI.
-    Calls on_progress(line) for each streamed NDJSON status update (layer
+    Calls on_progress(Progress) for a streamed NDJSON status update (layer
     download percentage, "verifying sha256 digest", etc.) so a caller can
     show live progress instead of a frozen UI for what can be a many-GB,
-    many-minute download. Returns (True, "") on success, (False, error)
+    many-minute download; the server sends many events per second, so a
+    report follows only when the status or the rounded percent changed.
+    Returns (True, "") on success, (False, error)
     otherwise -- never raises, same contract as delete_model() above."""
+    last: tuple[str, int | None] | None = None
     try:
         with _open(host, "/api/pull", {"model": model, "stream": True}, 1800) as response:
             for raw_line in response:
@@ -132,11 +144,17 @@ def pull_model(model: str, host: str,
                 status = event.get("status", "")
                 if on_progress and status:
                     total, completed = event.get("total"), event.get("completed")
+                    percent = None
                     if (isinstance(total, (int, float)) and isinstance(completed, (int, float))
                             and total and completed):
-                        on_progress(f"{model}: {status} ({completed / total * 100:.0f}%)")
+                        percent = round(min(completed / total, 1.0) * 100)
+                    if (status, percent) == last:
+                        continue
+                    last = (status, percent)
+                    if percent is None:
+                        on_progress(Progress(f"{model}: {status}"))
                     else:
-                        on_progress(f"{model}: {status}")
+                        on_progress(Progress(f"{model}: {status} ({percent}%)", percent / 100))
         return True, ""
     except _CALL_ERRORS as exc:
         return False, _failure(exc)
@@ -279,7 +297,7 @@ def relink_derived_model(model: str, base: str, host: str) -> tuple[bool, str]:
 
 
 def update_model(model: str, host: str,
-                  on_progress: Callable[[str], None] | None = None) -> tuple[bool, str]:
+                  on_progress: Callable[[Progress], None] | None = None) -> tuple[bool, str]:
     """"Update" for the Settings dialog's "Update selected…" button: pulls
     `model` itself; if the registry has no such model, it is a custom model
     (see _NOT_IN_REGISTRY_RE above), so its base (parent_model()) is pulled
@@ -293,15 +311,15 @@ def update_model(model: str, host: str,
     if base is None or base == model:
         return False, f"{error} (a custom model, but Ollama does not record the model it was built from)"
     if on_progress:
-        on_progress(f"{model}: a custom model built from {base}; updating {base}")
+        on_progress(Progress(f"{model}: a custom model built from {base}; updating {base}"))
     ok, base_error = pull_model(base, host=host, on_progress=on_progress)
     if not ok:
         return False, f"Pulling base {base} failed: {base_error}"
     current = _weights_blob(model, host=host)
     if current is not None and current == _weights_blob(base, host=host):
         if on_progress:
-            on_progress(f"{model}: already uses the current {base}")
+            on_progress(Progress(f"{model}: already uses the current {base}"))
         return True, ""
     if on_progress:
-        on_progress(f"{model}: relinking to updated {base}")
+        on_progress(Progress(f"{model}: relinking to updated {base}"))
     return relink_derived_model(model, base, host=host)

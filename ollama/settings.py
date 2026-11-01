@@ -12,9 +12,10 @@ from typing import TYPE_CHECKING
 
 from PySide6.QtCore import QObject, Qt
 from PySide6.QtWidgets import (QAbstractItemView, QHBoxLayout, QLineEdit, QListWidget, QListWidgetItem,
-                               QMessageBox, QPushButton, QWidget)
+                               QMessageBox, QProgressBar, QPushButton, QWidget)
 
 from . import admin
+from .admin import Progress
 from slidemage.plugin_api import Host, RouteTaskLease
 from .provider import InstalledModel, ollama_host
 
@@ -50,11 +51,17 @@ def _delete_models(address: str, models: list[str]) -> Results:
     return results
 
 
-def _update_models(address: str, models: list[str], report: Callable[[str], None]) -> Results:
+def _update_models(address: str, models: list[str], report: Callable[[Progress], None]) -> Results:
     results: Results = []
-    for model in models:
-        report(f"Updating Ollama model {model}…")
-        ok, error = admin.update_model(model, address, on_progress=report)
+    for number, model in enumerate(models, start=1):
+        # With several models selected, every line says which one of them it is.
+        which = f" (model {number} of {len(models)})" if len(models) > 1 else ""
+
+        def step(progress: Progress, which: str = which) -> None:
+            report(Progress(progress.text + which, progress.fraction))
+
+        step(Progress(f"Updating Ollama model {model}…"))
+        ok, error = admin.update_model(model, address, on_progress=step)
         results.append((model, ok, error))
     return results
 
@@ -79,6 +86,10 @@ class OllamaTab(QObject):
         self.page.body.addWidget(host.Field("Ollama address", _row(self.host_edit, refresh)))
         self.status = host.caption("")
         self.page.body.addWidget(self.status)
+        self.progress_bar = QProgressBar()
+        self.progress_bar.setTextVisible(False)
+        self.progress_bar.hide()  # shown only while an update or delete runs
+        self.page.body.addWidget(self.progress_bar)
 
         self.models_list = QListWidget()
         self.models_list.setSelectionMode(QAbstractItemView.SelectionMode.ExtendedSelection)
@@ -134,6 +145,20 @@ class OllamaTab(QObject):
         self.update_button.setEnabled(enabled)
         self.delete_button.setEnabled(enabled)
 
+    def _show_progress(self, progress: Progress) -> None:
+        """Draw one report on the UI thread: the status line and the bar (determinate when the fraction is
+        known), or, if the page was closed meanwhile, the main window's status line."""
+        if not self._alive:
+            self.host.show_message(progress.text)
+            return
+        self.status.setText(progress.text)
+        if progress.fraction is None:
+            self.progress_bar.setRange(0, 0)  # indeterminate
+        else:
+            self.progress_bar.setRange(0, 100)
+            self.progress_bar.setValue(round(progress.fraction * 100))
+        self.progress_bar.show()
+
     def _on_host(self) -> None:
         settings = self.host.settings()
         previous = settings.get("ollama_host")
@@ -177,7 +202,8 @@ class OllamaTab(QObject):
             return
         try:
             address = ollama_host(self.host)
-            self._run(lambda _report: _delete_models(address, models), "Deleted", "Delete failed", lease)
+            self._run(lambda _report: _delete_models(address, models), "Deleted", "Delete failed", lease,
+                      Progress("Deleting model…" if len(models) == 1 else f"Deleting {len(models)} models…"))
         except BaseException:
             lease.release()
             raise
@@ -201,18 +227,21 @@ class OllamaTab(QObject):
             return
         try:
             address = ollama_host(self.host)
+            self.host.log(f"Updating Ollama model(s): {', '.join(models)}")
             self._run(lambda report: _update_models(address, models, report), "Updated", "Update failed", lease)
         except BaseException:
             lease.release()
             raise
 
-    def _run(self, work: Callable[[Callable[[str], None]], Results], done: str, failed_title: str,
-             lease: RouteTaskLease) -> None:
+    def _run(self, work: Callable[[Callable[[Progress], None]], Results], done: str, failed_title: str,
+             lease: RouteTaskLease, first: Progress | None = None) -> None:
         self._busy = True
         self.host_edit.setEnabled(False)
         self.models_list.setEnabled(False)
         self._sync_buttons()
         host = self.host
+        if first is not None:
+            self._show_progress(first)
 
         def finished(results: Results | None, error: BaseException | None) -> None:
             lease.release()  # UI thread, even after the page was destroyed
@@ -229,12 +258,13 @@ class OllamaTab(QObject):
                         f"{done} {len(results or []) - len(failures)} of {len(results or [])}. Failed:\n"
                         + "\n".join(f"{model}: {error}" for model, error in failures), error=True)
             if self._alive:
+                self.progress_bar.hide()
                 self.host_edit.setEnabled(True)
                 self.refresh()
             else:
                 self.route.refresh_models()
 
         try:
-            host.run_in_background_with_progress(work, host.log, finished)
+            host.run_in_background_with_progress(work, self._show_progress, finished)
         except Exception as exc:  # the host could not schedule the work
             finished(None, exc)
